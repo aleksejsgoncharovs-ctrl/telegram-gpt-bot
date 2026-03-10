@@ -5,6 +5,7 @@ from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filte
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OWNER_TELEGRAM_ID = os.getenv("OWNER_TELEGRAM_ID")
 
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN is missing")
@@ -12,34 +13,79 @@ if not TELEGRAM_BOT_TOKEN:
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY is missing")
 
+if not OWNER_TELEGRAM_ID:
+    raise ValueError("OWNER_TELEGRAM_ID is missing")
+
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-chat_history = []
+# Активен ли бот в конкретном чате
+chat_active_state = {}
+
+# История сообщений по каждому чату
+chat_histories = {}
+
+
+def is_owner(update: Update) -> bool:
+    user = update.effective_user
+    if not user:
+        return False
+    return str(user.id) == str(OWNER_TELEGRAM_ID)
+
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
 
-    user_message = update.message.text
+    chat_id = str(update.effective_chat.id)
+    user_message = update.message.text.strip()
+    user_message_lower = user_message.lower()
 
-    chat_history.append({
+    # Команды управления только от владельца
+    if is_owner(update):
+        if user_message_lower == "старт":
+            chat_active_state[chat_id] = True
+            await update.message.reply_text("Бот активирован и теперь отвечает на сообщения в этом чате.")
+            return
+
+        if user_message_lower == "стоп":
+            chat_active_state[chat_id] = False
+            await update.message.reply_text("Бот остановлен и переведён в неактивный режим в этом чате.")
+            return
+
+    # Если бот не активирован в этом чате — молчим
+    if not chat_active_state.get(chat_id, False):
+        return
+
+    # Не отвечаем на собственные служебные команды владельца
+    if is_owner(update) and user_message_lower in {"старт", "стоп"}:
+        return
+
+    if chat_id not in chat_histories:
+        chat_histories[chat_id] = []
+
+    chat_histories[chat_id].append({
         "role": "user",
         "content": user_message
     })
 
-    response = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=chat_history[-10:]
-    )
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=chat_histories[chat_id][-10:]
+        )
 
-    answer = response.choices[0].message.content
+        answer = response.choices[0].message.content
 
-    chat_history.append({
-        "role": "assistant",
-        "content": answer
-    })
+        chat_histories[chat_id].append({
+            "role": "assistant",
+            "content": answer
+        })
 
-    await update.message.reply_text(answer)
+        await update.message.reply_text(answer)
+
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка OpenAI: {e}")
+
 
 def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
@@ -49,6 +95,7 @@ def main():
     )
 
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
