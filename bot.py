@@ -5,7 +5,9 @@ from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filte
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OWNER_TELEGRAM_ID = str(os.getenv("OWNER_TELEGRAM_ID", "")).strip()
+
+# Временно прописываем владельца напрямую
+OWNER_TELEGRAM_ID = "563791610"
 
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN is missing")
