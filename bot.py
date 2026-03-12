@@ -19,19 +19,11 @@ if not OPENAI_API_KEY:
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Включен ли бот в конкретном чате
 chat_active_state = {}
-
-# История сообщений по каждому чату
 chat_histories = {}
-
-# Режимы по каждому чату: тихий / обычный / активный
 chat_modes = {}
-
-# Антиспам: время последнего ответа в чате
 last_reply_time = {}
 
-# Минимальная пауза между ответами бота в группе
 MIN_REPLY_INTERVAL_SECONDS = 12
 
 SYSTEM_PROMPT = """
@@ -41,10 +33,10 @@ SYSTEM_PROMPT = """
 Не будь слишком формальным.
 Не спамь.
 Если участие не нужно — лучше промолчи.
-Если обсуждение требует полезного совета, комментария, шутки или уточнения — подключайся.
-Не выдумывай факты.
-Если не уверен — так и скажи.
-Отвечай внятно, без лишней воды.
+Если обсуждение требует совета, комментария, шутки, уточнения или свежей информации — подключайся.
+Если вопрос требует актуальных данных, используй веб-поиск.
+Если в свежих данных не уверен, так и скажи.
+Ссылайся на найденные источники кратко и по делу.
 """
 
 def is_owner(update: Update) -> bool:
@@ -80,6 +72,11 @@ def should_reply_in_group(user_message: str, user_message_lower: str, chat_id: s
         "можешь",
         "объясни",
         "посоветуй",
+        "найди",
+        "посмотри в интернете",
+        "актуально",
+        "сейчас",
+        "новости",
     ]
 
     has_question = "?" in user_message
@@ -101,6 +98,60 @@ def should_reply_in_group(user_message: str, user_message_lower: str, chat_id: s
 
     return False
 
+def needs_web_search(user_message_lower: str) -> bool:
+    web_triggers = [
+        "сейчас",
+        "актуаль",
+        "новост",
+        "сегодня",
+        "свеж",
+        "последн",
+        "в интернете",
+        "онлайн",
+        "найди",
+        "посмотри",
+        "проверь",
+        "какой сейчас",
+        "кто сейчас",
+        "курс",
+        "цена",
+        "погода",
+        "расписание",
+    ]
+    return any(trigger in user_message_lower for trigger in web_triggers)
+
+def build_input_messages(chat_id: str, user_message: str):
+    history = chat_histories.get(chat_id, [])[-12:]
+    input_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    input_messages.extend(history)
+    input_messages.append({"role": "user", "content": user_message})
+    return input_messages
+
+def extract_text_from_response(response) -> str:
+    # Универсальный и максимально совместимый способ
+    text_parts = []
+
+    output = getattr(response, "output", None)
+    if output:
+        for item in output:
+            content = getattr(item, "content", None)
+            if not content:
+                continue
+            for c in content:
+                if getattr(c, "type", None) in ("output_text", "text"):
+                    txt = getattr(c, "text", None)
+                    if txt:
+                        text_parts.append(txt)
+
+    if text_parts:
+        return "\n".join(text_parts).strip()
+
+    fallback = getattr(response, "output_text", None)
+    if fallback:
+        return fallback.strip()
+
+    return "Не удалось получить текст ответа."
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
@@ -111,7 +162,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user or not chat:
         return
 
-    # Игнорируем сообщения других ботов
     if user.is_bot:
         return
 
@@ -121,25 +171,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text.strip()
     user_message_lower = user_message.lower()
 
-    # Диагностика
     if user_message_lower == "тестбот":
         await update.message.reply_text(
             f"Я вижу это сообщение.\n"
             f"chat_type={chat_type}\n"
             f"chat_id={chat_id}\n"
             f"user_id={user_id}\n"
-            f"owner_env={OWNER_TELEGRAM_ID}\n"
             f"owner_match={is_owner(update)}\n"
             f"active={chat_active_state.get(chat_id, False)}\n"
             f"mode={get_chat_mode(chat_id)}"
         )
         return
 
-    # Личка: бот всегда активен
     if chat_type == "private":
         active = True
     else:
-        # Управление только владельцем
         if is_owner(update):
             if user_message_lower == "старт":
                 chat_active_state[chat_id] = True
@@ -189,29 +235,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not active:
         return
 
-    # В группе не отвечаем слишком часто
     if chat_type != "private":
         if is_rate_limited(chat_id):
             return
-
         if not should_reply_in_group(user_message, user_message_lower, chat_id):
             return
 
     if chat_id not in chat_histories:
         chat_histories[chat_id] = []
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    messages.extend(chat_histories[chat_id][-12:])
-    messages.append({"role": "user", "content": user_message})
+    input_messages = build_input_messages(chat_id, user_message)
+    use_web = needs_web_search(user_message_lower)
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=messages,
-            max_tokens=220
-        )
+        request_kwargs = {
+            "model": "gpt-4.1-mini",
+            "input": input_messages,
+        }
 
-        answer = response.choices[0].message.content
+        if use_web:
+            request_kwargs["tools"] = [{"type": "web_search"}]
+
+        response = client.responses.create(**request_kwargs)
+        answer = extract_text_from_response(response)
 
         chat_histories[chat_id].append({
             "role": "user",
@@ -222,7 +268,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "content": answer
         })
 
-        # Ограничиваем память
         chat_histories[chat_id] = chat_histories[chat_id][-24:]
 
         await update.message.reply_text(answer)
@@ -236,7 +281,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Сейчас не могу ответить: закончилась или ограничена квота OpenAI API."
             )
         else:
-            await update.message.reply_text(f"Ошибка: {error_text[:300]}")
+            await update.message.reply_text(f"Ошибка: {error_text[:500]}")
 
 def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
