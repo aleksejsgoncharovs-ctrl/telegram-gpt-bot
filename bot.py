@@ -1,6 +1,9 @@
 import os
 import time
 import random
+from datetime import time as dtime
+from zoneinfo import ZoneInfo
+
 from openai import OpenAI
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
@@ -19,10 +22,13 @@ if not OPENAI_API_KEY:
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+BOT_TIMEZONE = ZoneInfo("Europe/Nicosia")
+
 chat_active_state = {}
 chat_histories = {}
 chat_modes = {}
 last_reply_time = {}
+known_members = {}
 
 MIN_REPLY_INTERVAL_SECONDS = 12
 
@@ -34,9 +40,8 @@ SYSTEM_PROMPT = """
 Не спамь.
 Если участие не нужно — лучше промолчи.
 Если обсуждение требует совета, комментария, шутки, уточнения или свежей информации — подключайся.
-Если вопрос требует актуальных данных, используй веб-поиск.
-Если в свежих данных не уверен, так и скажи.
-Ссылайся на найденные источники кратко и по делу.
+Если не уверен — так и скажи.
+Отвечай внятно, без лишней воды.
 """
 
 def is_owner(update: Update) -> bool:
@@ -56,6 +61,76 @@ def is_rate_limited(chat_id: str) -> bool:
 def mark_replied(chat_id: str) -> None:
     last_reply_time[chat_id] = time.time()
 
+def get_display_name(user) -> str:
+    if not user:
+        return "друг"
+    if user.first_name and user.last_name:
+        return f"{user.first_name} {user.last_name}".strip()
+    if user.first_name:
+        return user.first_name.strip()
+    if user.username:
+        return f"@{user.username}"
+    return "друг"
+
+def remember_member(chat_id: str, user) -> None:
+    if not user or user.is_bot:
+        return
+    if chat_id not in known_members:
+        known_members[chat_id] = {}
+    known_members[chat_id][str(user.id)] = get_display_name(user)
+
+def get_member_names(chat_id: str):
+    return list(known_members.get(chat_id, {}).values())
+
+def fallback_greeting(chat_id: str, morning: bool = True) -> str:
+    members = get_member_names(chat_id)
+    names = ", ".join(members) if members else "друзья"
+
+    morning_variants = [
+        f"Доброе утро, {names}! Пусть день будет лёгким и удачным 🌞",
+        f"Всем доброе утро, {names}! Хорошего настроения и отличного дня ✨",
+        f"Доброе утро, {names}! Желаю продуктивного и приятного дня ☀️",
+    ]
+
+    night_variants = [
+        f"Спокойной ночи, {names}! Пусть сны будут добрыми и тёплыми 🌙",
+        f"Доброй ночи, {names}! Хорошего отдыха и сладких снов ✨",
+        f"Спокойной ночи, {names}! Отдыхайте хорошо и набирайтесь сил 🌜",
+    ]
+
+    return random.choice(morning_variants if morning else night_variants)
+
+def generate_dynamic_greeting(chat_id: str, morning: bool = True) -> str:
+    members = get_member_names(chat_id)
+    names = ", ".join(members) if members else "друзья"
+
+    prompt = (
+        f"Сгенерируй короткое, тёплое и живое сообщение для Telegram-чата. "
+        f"Обратись к участникам: {names}. "
+        f"{'Пожелай доброго утра и хорошего дня.' if morning else 'Пожелай спокойной ночи и хороших снов.'} "
+        f"Сообщение должно быть 1-2 предложения, без длинной поэзии, без пафоса, естественное, дружелюбное, на русском языке."
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Ты пишешь короткие, тёплые и естественные сообщения для Telegram-чата на русском языке."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            max_tokens=120
+        )
+        text = response.choices[0].message.content.strip()
+        return text if text else fallback_greeting(chat_id, morning=morning)
+    except Exception:
+        return fallback_greeting(chat_id, morning=morning)
+
 def should_reply_in_group(user_message: str, user_message_lower: str, chat_id: str) -> bool:
     mode = get_chat_mode(chat_id)
 
@@ -73,7 +148,7 @@ def should_reply_in_group(user_message: str, user_message_lower: str, chat_id: s
         "объясни",
         "посоветуй",
         "найди",
-        "посмотри в интернете",
+        "посмотри",
         "актуально",
         "сейчас",
         "новости",
@@ -98,59 +173,40 @@ def should_reply_in_group(user_message: str, user_message_lower: str, chat_id: s
 
     return False
 
-def needs_web_search(user_message_lower: str) -> bool:
-    web_triggers = [
-        "сейчас",
-        "актуаль",
-        "новост",
-        "сегодня",
-        "свеж",
-        "последн",
-        "в интернете",
-        "онлайн",
-        "найди",
-        "посмотри",
-        "проверь",
-        "какой сейчас",
-        "кто сейчас",
-        "курс",
-        "цена",
-        "погода",
-        "расписание",
-    ]
-    return any(trigger in user_message_lower for trigger in web_triggers)
+async def morning_greeting_job(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(context.job.chat_id)
+    text = generate_dynamic_greeting(chat_id, morning=True)
+    await context.bot.send_message(chat_id=context.job.chat_id, text=text)
 
-def build_input_messages(chat_id: str, user_message: str):
-    history = chat_histories.get(chat_id, [])[-12:]
-    input_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    input_messages.extend(history)
-    input_messages.append({"role": "user", "content": user_message})
-    return input_messages
+async def night_greeting_job(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(context.job.chat_id)
+    text = generate_dynamic_greeting(chat_id, morning=False)
+    await context.bot.send_message(chat_id=context.job.chat_id, text=text)
 
-def extract_text_from_response(response) -> str:
-    # Универсальный и максимально совместимый способ
-    text_parts = []
+def ensure_daily_jobs(application, chat_id: int):
+    chat_id_str = str(chat_id)
 
-    output = getattr(response, "output", None)
-    if output:
-        for item in output:
-            content = getattr(item, "content", None)
-            if not content:
-                continue
-            for c in content:
-                if getattr(c, "type", None) in ("output_text", "text"):
-                    txt = getattr(c, "text", None)
-                    if txt:
-                        text_parts.append(txt)
+    morning_job_name = f"morning_{chat_id_str}"
+    night_job_name = f"night_{chat_id_str}"
 
-    if text_parts:
-        return "\n".join(text_parts).strip()
+    existing_morning = application.job_queue.get_jobs_by_name(morning_job_name)
+    existing_night = application.job_queue.get_jobs_by_name(night_job_name)
 
-    fallback = getattr(response, "output_text", None)
-    if fallback:
-        return fallback.strip()
+    if not existing_morning:
+        application.job_queue.run_daily(
+            morning_greeting_job,
+            time=dtime(hour=7, minute=0, tzinfo=BOT_TIMEZONE),
+            name=morning_job_name,
+            chat_id=chat_id,
+        )
 
-    return "Не удалось получить текст ответа."
+    if not existing_night:
+        application.job_queue.run_daily(
+            night_greeting_job,
+            time=dtime(hour=22, minute=0, tzinfo=BOT_TIMEZONE),
+            name=night_job_name,
+            chat_id=chat_id,
+        )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -171,6 +227,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text.strip()
     user_message_lower = user_message.lower()
 
+    remember_member(chat_id, user)
+
     if user_message_lower == "тестбот":
         await update.message.reply_text(
             f"Я вижу это сообщение.\n"
@@ -179,7 +237,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"user_id={user_id}\n"
             f"owner_match={is_owner(update)}\n"
             f"active={chat_active_state.get(chat_id, False)}\n"
-            f"mode={get_chat_mode(chat_id)}"
+            f"mode={get_chat_mode(chat_id)}\n"
+            f"known_members={len(known_members.get(chat_id, {}))}"
         )
         return
 
@@ -191,9 +250,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_active_state[chat_id] = True
                 if chat_id not in chat_modes:
                     chat_modes[chat_id] = "обычный"
+
+                ensure_daily_jobs(context.application, chat.id)
+
                 await update.message.reply_text(
                     f"Бот активирован в этом чате.\n"
-                    f"Режим: {get_chat_mode(chat_id)}"
+                    f"Режим: {get_chat_mode(chat_id)}\n"
+                    f"Ежедневные приветствия включены: 07:00 и 22:00"
                 )
                 return
 
@@ -221,13 +284,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(
                     f"Активен: {chat_active_state.get(chat_id, False)}\n"
                     f"Режим: {get_chat_mode(chat_id)}\n"
-                    f"История в памяти: {len(chat_histories.get(chat_id, []))} сообщений"
+                    f"История в памяти: {len(chat_histories.get(chat_id, []))} сообщений\n"
+                    f"Известных участников: {len(known_members.get(chat_id, {}))}"
                 )
                 return
 
             if user_message_lower == "очистить память":
                 chat_histories[chat_id] = []
                 await update.message.reply_text("Память этого чата очищена.")
+                return
+
+            if user_message_lower == "кто в чате":
+                members = get_member_names(chat_id)
+                if not members:
+                    await update.message.reply_text("Пока никого не запомнил в этом чате.")
+                else:
+                    await update.message.reply_text("Я знаю таких участников:\n" + "\n".join(members))
                 return
 
         active = chat_active_state.get(chat_id, False)
@@ -244,20 +316,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id not in chat_histories:
         chat_histories[chat_id] = []
 
-    input_messages = build_input_messages(chat_id, user_message)
-    use_web = needs_web_search(user_message_lower)
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages.extend(chat_histories[chat_id][-12:])
+    messages.append({"role": "user", "content": user_message})
 
     try:
-        request_kwargs = {
-            "model": "gpt-4.1-mini",
-            "input": input_messages,
-        }
+        response = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=messages,
+            max_tokens=220
+        )
 
-        if use_web:
-            request_kwargs["tools"] = [{"type": "web_search"}]
-
-        response = client.responses.create(**request_kwargs)
-        answer = extract_text_from_response(response)
+        answer = response.choices[0].message.content
 
         chat_histories[chat_id].append({
             "role": "user",
@@ -275,13 +345,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         error_text = str(e)
-
         if "insufficient_quota" in error_text or "429" in error_text:
             await update.message.reply_text(
                 "Сейчас не могу ответить: закончилась или ограничена квота OpenAI API."
             )
         else:
-            await update.message.reply_text(f"Ошибка: {error_text[:500]}")
+            await update.message.reply_text(f"Ошибка: {error_text[:300]}")
 
 def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
