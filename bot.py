@@ -5,7 +5,6 @@ from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filte
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OWNER_TELEGRAM_ID = os.getenv("OWNER_TELEGRAM_ID", "")
 
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN is missing")
@@ -15,54 +14,28 @@ if not OPENAI_API_KEY:
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-chat_active_state = {}
-chat_histories = {}
-
-def is_owner(update: Update) -> bool:
-    user = update.effective_user
-    if not user:
-        return False
-    return str(user.id) == str(OWNER_TELEGRAM_ID)
+chat_history = []
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
 
-    chat_id = str(update.effective_chat.id)
     user_message = update.message.text.strip()
-    user_message_lower = user_message.lower()
-
-    if OWNER_TELEGRAM_ID and is_owner(update):
-        if user_message_lower == "старт":
-            chat_active_state[chat_id] = True
-            await update.message.reply_text("Бот активирован.")
-            return
-
-        if user_message_lower == "стоп":
-            chat_active_state[chat_id] = False
-            await update.message.reply_text("Бот остановлен.")
-            return
-
-    if not chat_active_state.get(chat_id, False):
-        return
-
-    if chat_id not in chat_histories:
-        chat_histories[chat_id] = []
-
-    chat_histories[chat_id].append({
-        "role": "user",
-        "content": user_message
-    })
 
     try:
+        chat_history.append({
+            "role": "user",
+            "content": user_message
+        })
+
         response = client.chat.completions.create(
             model="gpt-4.1-mini",
-            messages=chat_histories[chat_id][-10:]
+            messages=chat_history[-10:]
         )
 
         answer = response.choices[0].message.content
 
-        chat_histories[chat_id].append({
+        chat_history.append({
             "role": "assistant",
             "content": answer
         })
