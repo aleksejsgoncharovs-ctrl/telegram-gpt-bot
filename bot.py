@@ -26,17 +26,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
 
+    # Игнорируем сообщения других ботов
+    if update.effective_user and update.effective_user.is_bot:
+        return
+
     chat = update.effective_chat
+    user = update.effective_user
+
     chat_id = str(chat.id)
     chat_type = chat.type
+    user_id = str(user.id) if user else "unknown"
     user_message = update.message.text.strip()
     user_message_lower = user_message.lower()
+
+    # ДИАГНОСТИКА: если в группе написать "тестбот",
+    # бот ответит технической информацией
+    if user_message_lower == "тестбот":
+        await update.message.reply_text(
+            f"Я вижу это сообщение.\n"
+            f"chat_type={chat_type}\n"
+            f"chat_id={chat_id}\n"
+            f"user_id={user_id}\n"
+            f"owner_match={is_owner(update)}"
+        )
+        return
 
     # В личке бот всегда отвечает
     if chat_type == "private":
         active = True
     else:
-        # Команды старт/стоп только от владельца
+        # В группе старт/стоп только от владельца
         if is_owner(update):
             if user_message_lower == "старт":
                 chat_active_state[chat_id] = True
