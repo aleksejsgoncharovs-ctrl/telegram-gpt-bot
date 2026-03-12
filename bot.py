@@ -5,7 +5,7 @@ from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filte
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OWNER_TELEGRAM_ID = os.getenv("OWNER_TELEGRAM_ID")
+OWNER_TELEGRAM_ID = os.getenv("OWNER_TELEGRAM_ID", "")
 
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN is missing")
@@ -13,24 +13,16 @@ if not TELEGRAM_BOT_TOKEN:
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY is missing")
 
-if not OWNER_TELEGRAM_ID:
-    raise ValueError("OWNER_TELEGRAM_ID is missing")
-
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Активен ли бот в конкретном чате
 chat_active_state = {}
-
-# История сообщений по каждому чату
 chat_histories = {}
-
 
 def is_owner(update: Update) -> bool:
     user = update.effective_user
     if not user:
         return False
     return str(user.id) == str(OWNER_TELEGRAM_ID)
-
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -40,24 +32,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text.strip()
     user_message_lower = user_message.lower()
 
-    # Команды управления только от владельца
-    if is_owner(update):
+    if OWNER_TELEGRAM_ID and is_owner(update):
         if user_message_lower == "старт":
             chat_active_state[chat_id] = True
-            await update.message.reply_text("Бот активирован и теперь отвечает на сообщения в этом чате.")
+            await update.message.reply_text("Бот активирован.")
             return
 
         if user_message_lower == "стоп":
             chat_active_state[chat_id] = False
-            await update.message.reply_text("Бот остановлен и переведён в неактивный режим в этом чате.")
+            await update.message.reply_text("Бот остановлен.")
             return
 
-    # Если бот не активирован в этом чате — молчим
     if not chat_active_state.get(chat_id, False):
-        return
-
-    # Не отвечаем на собственные служебные команды владельца
-    if is_owner(update) and user_message_lower in {"старт", "стоп"}:
         return
 
     if chat_id not in chat_histories:
@@ -84,18 +70,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(answer)
 
     except Exception as e:
-        await update.message.reply_text(f"Ошибка OpenAI: {e}")
-
+        await update.message.reply_text(f"Ошибка: {e}")
 
 def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-
-    app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
-    )
-
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
